@@ -183,10 +183,25 @@ pub(crate) async fn startup_with_incoming<
         let mut grpc_shutdown = shutdown_noti.subscribe_for_shutdown();
         tokio::spawn(async move {
             let shutdown_signal = grpc_shutdown.recv();
-            let grpc_server_future = create_grpc_server(&grpc_server_config)
-                .add_service(server)
-                .serve_with_incoming_shutdown(incoming, shutdown_signal);
-            grpc_server_future.await.map_err(|e| {
+            let router = create_grpc_server(&grpc_server_config)
+                .layer(ballista_core::tls::AuthorizeLayer)
+                .add_service(server);
+            let result = match ballista_core::tls::config() {
+                Some(tls) => {
+                    router
+                        .serve_with_incoming_shutdown(
+                            ballista_core::tls::accept(incoming, tls),
+                            shutdown_signal,
+                        )
+                        .await
+                }
+                None => {
+                    router
+                        .serve_with_incoming_shutdown(incoming, shutdown_signal)
+                        .await
+                }
+            };
+            result.map_err(|e| {
                 error!("Tonic error, Could not start Executor Grpc Server.");
                 BallistaError::TonicError(e)
             })
@@ -340,7 +355,7 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> ExecutorServer<T,
                 })?;
             }
 
-            let connection = endpoint.connect().await?;
+            let connection = ballista_core::tls::connect(endpoint).await?;
             let scheduler = SchedulerGrpcClient::new(connection)
                 .max_encoding_message_size(self.grpc_max_encoding_message_size)
                 .max_decoding_message_size(self.grpc_max_decoding_message_size);

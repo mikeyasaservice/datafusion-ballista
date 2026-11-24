@@ -52,23 +52,29 @@ datafusion = { workspace = true }
 datafusion-proto = { workspace = true }
 datafusion-proto-common = { workspace = true }
 futures = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
 log = { workspace = true }
 lru = { version = "0.19", optional = true }
 object_store = { workspace = true, features = ["aws", "http"], optional = true }
 parking_lot = { workspace = true }
 pastey = { workspace = true }
 prost = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { workspace = true, features = ["net"] }
+tokio-rustls = { version = "0.26", default-features = false }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
 url = { workspace = true }
 utoipa = { workspace = true, optional = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }
 

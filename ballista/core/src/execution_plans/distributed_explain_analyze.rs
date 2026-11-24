@@ -234,8 +234,7 @@ pub(crate) async fn fetch_job_metrics(
             .map_err(|e| DataFusionError::Execution(format!("{e:?}")))?;
     }
 
-    let connection = endpoint
-        .connect()
+    let connection = crate::tls::connect(endpoint)
         .await
         .map_err(|e| DataFusionError::Execution(format!("{e:?}")))?;
 

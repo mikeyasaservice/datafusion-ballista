@@ -235,6 +235,8 @@ pub async fn start_grpc_service_with_listener<
         tonic.fallback(|| async { SchedulerErrorResponse::new(StatusCode::NOT_FOUND) });
 
     let health = health_routes(scheduler.clone());
+    let health_only = health.clone();
+    let health_shutdown = scheduler.subscribe_for_shutdown();
 
     #[cfg(feature = "rest-api")]
     let merged = if config.disable_rest_api {
@@ -255,10 +257,23 @@ pub async fn start_grpc_service_with_listener<
         ))
         .merge(health);
 
+    let keepalive = tcp_keepalive(config.grpc_server_tcp_keepalive_seconds);
+    if let Some(tls) = ballista_core::tls::config() {
+        return tls_serve::serve(
+            listener,
+            merged,
+            health_only,
+            tls,
+            keepalive,
+            shutdown,
+            health_shutdown,
+        )
+        .await;
+    }
+
     let final_route =
         with_version_headers(merged).into_make_service_with_connect_info::<SocketAddr>();
 
-    let keepalive = tcp_keepalive(config.grpc_server_tcp_keepalive_seconds);
     let listener = listener.tap_io(move |tcp| configure_connection(tcp, keepalive));
     axum::serve(listener, final_route)
         .with_graceful_shutdown(async move { shutdown.recv().await })
@@ -491,5 +506,116 @@ mod tests {
         );
 
         drop(client);
+    }
+}
+
+/// The scheduler's listener when Ballista TLS is configured: every connection
+/// is mutual TLS and every request is authorized. Kubernetes probes cannot
+/// present a client certificate, so `/healthz` and `/readyz` are also served
+/// without TLS on [`ballista_core::tls::TlsConfig::plain_health`], when set.
+mod tls_serve {
+    use super::{configure_connection, with_version_headers};
+    use axum::{
+        Router,
+        extract::{ConnectInfo, Request, connect_info::Connected},
+        serve::{IncomingStream, Listener},
+    };
+    use ballista_core::shutdown::Shutdown;
+    use ballista_core::{
+        error::BallistaError,
+        tls::{self, AuthorizeLayer, PeerIdentity, TlsConfig, TlsConn},
+    };
+    use futures::{Stream, StreamExt};
+    use std::{io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+
+    pub(super) struct TlsListener {
+        conns: Pin<Box<dyn Stream<Item = io::Result<TlsConn>> + Send>>,
+        local: SocketAddr,
+    }
+
+    impl Listener for TlsListener {
+        type Io = TlsConn;
+        type Addr = SocketAddr;
+        async fn accept(&mut self) -> (TlsConn, SocketAddr) {
+            loop {
+                match self.conns.next().await {
+                    Some(Ok(conn)) => {
+                        let addr = conn.peer().addr;
+                        return (conn, addr);
+                    }
+                    Some(Err(_)) => continue,
+                    None => std::future::pending().await,
+                }
+            }
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(self.local)
+        }
+    }
+
+    #[derive(Clone)]
+    struct TlsPeer(PeerIdentity);
+
+    impl Connected<IncomingStream<'_, TlsListener>> for TlsPeer {
+        fn connect_info(stream: IncomingStream<'_, TlsListener>) -> Self {
+            TlsPeer(stream.io().peer().clone())
+        }
+    }
+
+    /// Expose the verified peer as [`PeerIdentity`] for [`AuthorizeLayer`]
+    /// and handlers, and its address as `ConnectInfo<SocketAddr>` as without
+    /// TLS.
+    async fn expose_peer(mut request: Request) -> Request {
+        if let Some(ConnectInfo(TlsPeer(peer))) =
+            request.extensions().get::<ConnectInfo<TlsPeer>>().cloned()
+        {
+            request.extensions_mut().insert(ConnectInfo(peer.addr));
+            request.extensions_mut().insert(peer);
+        }
+        request
+    }
+
+    pub(super) async fn serve(
+        listener: tokio::net::TcpListener,
+        routes: Router,
+        health: Router,
+        tls: &Arc<TlsConfig>,
+        keepalive: Option<Duration>,
+        mut shutdown: Shutdown,
+        mut health_shutdown: Shutdown,
+    ) -> ballista_core::error::Result<()> {
+        let local = listener.local_addr()?;
+        let tcp =
+            tokio_stream::wrappers::TcpListenerStream::new(listener).map(move |tcp| {
+                if let Ok(tcp) = &tcp {
+                    configure_connection(tcp, keepalive);
+                }
+                tcp
+            });
+        let listener = TlsListener {
+            conns: Box::pin(tls::accept(tcp, tls)),
+            local,
+        };
+        if let Some(addr) = tls.plain_health {
+            let health_listener = tokio::net::TcpListener::bind(addr).await?;
+            log::info!("Scheduler plain-HTTP health probes on {addr}");
+            tokio::spawn(async move {
+                let _ = axum::serve(health_listener, health.into_make_service())
+                    .with_graceful_shutdown(async move {
+                        health_shutdown.recv().await;
+                    })
+                    .await;
+            });
+        }
+        let app = with_version_headers(routes)
+            .layer(AuthorizeLayer)
+            .layer(axum::middleware::map_request(expose_peer))
+            .into_make_service_with_connect_info::<TlsPeer>();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown.recv().await;
+            })
+            .await
+            .map_err(BallistaError::from)
     }
 }

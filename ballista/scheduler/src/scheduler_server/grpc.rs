@@ -134,6 +134,9 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                 "Bad request because poll work is not supported for push-based task scheduling",
             ));
         }
+        if let Some(m) = &request.get_ref().metadata {
+            ballista_core::tls::check_executor(&request, &m.id, m.host.as_deref())?;
+        }
         let remote_addr = extract_connect_info(&request);
         if let PollWorkParams {
             metadata: Some(metadata),
@@ -236,6 +239,9 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
         &self,
         request: Request<RegisterExecutorParams>,
     ) -> Result<Response<RegisterExecutorResult>, Status> {
+        if let Some(m) = &request.get_ref().metadata {
+            ballista_core::tls::check_executor(&request, &m.id, m.host.as_deref())?;
+        }
         let remote_addr = extract_connect_info(&request);
         if let RegisterExecutorParams {
             metadata: Some(metadata),
@@ -269,6 +275,11 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
         &self,
         request: Request<HeartBeatParams>,
     ) -> Result<Response<HeartBeatResult>, Status> {
+        {
+            let r = request.get_ref();
+            let host = r.metadata.as_ref().and_then(|m| m.host.as_deref());
+            ballista_core::tls::check_executor(&request, &r.executor_id, host)?;
+        }
         let remote_addr = extract_connect_info(&request);
         let HeartBeatParams {
             executor_id,
@@ -389,6 +400,11 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
         &self,
         request: Request<UpdateTaskStatusParams>,
     ) -> Result<Response<UpdateTaskStatusResult>, Status> {
+        ballista_core::tls::check_executor(
+            &request,
+            &request.get_ref().executor_id,
+            None,
+        )?;
         let UpdateTaskStatusParams {
             executor_id,
             task_status,
@@ -757,6 +773,11 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
         &self,
         request: Request<ExecutorStoppedParams>,
     ) -> Result<Response<ExecutorStoppedResult>, Status> {
+        ballista_core::tls::check_executor(
+            &request,
+            &request.get_ref().executor_id,
+            None,
+        )?;
         let ExecutorStoppedParams {
             executor_id,
             reason,

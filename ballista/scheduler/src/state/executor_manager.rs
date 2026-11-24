@@ -597,7 +597,7 @@ impl ExecutorManager {
                 })?;
             }
 
-            let connection = endpoint.connect().await?;
+            let connection = ballista_core::tls::connect(endpoint).await?;
             // Message-size limits are tonic codec settings, not `Endpoint`
             // settings, so `create_grpc_client_endpoint` cannot apply them.
             // Without this the configured `max_message_size` is silently
@@ -617,14 +617,15 @@ impl ExecutorManager {
     async fn test_connectivity(metadata: &ExecutorMetadata) -> Result<()> {
         let executor_url = format!("http://{}:{}", metadata.host, metadata.grpc_port);
         debug!("Connecting to executor {executor_url:?}");
-        let _ = protobuf::executor_grpc_client::ExecutorGrpcClient::connect(executor_url)
-            .await
-            .map_err(|e| {
-                BallistaError::Internal(format!(
-                    "Failed to register executor at {}:{}, could not connect: {:?}",
-                    metadata.host, metadata.grpc_port, e
-                ))
-            })?;
+        // Over TLS when configured: the executor's listener accepts nothing else.
+        let endpoint = tonic::transport::Endpoint::from_shared(executor_url)
+            .map_err(|e| BallistaError::Internal(format!("invalid executor URL: {e}")))?;
+        let _ = ballista_core::tls::connect(endpoint).await.map_err(|e| {
+            BallistaError::Internal(format!(
+                "Failed to register executor at {}:{}, could not connect: {:?}",
+                metadata.host, metadata.grpc_port, e
+            ))
+        })?;
         Ok(())
     }
 

@@ -884,8 +884,7 @@ async fn execute_query_pull(
             .map_err(|e| DataFusionError::Execution(format!("{e:?}")))?;
     }
 
-    let connection = endpoint
-        .connect()
+    let connection = crate::tls::connect(endpoint)
         .await
         .map_err(|e| DataFusionError::Execution(format!("{e:?}")))?;
 
@@ -1104,8 +1103,7 @@ async fn execute_query_push(
             .map_err(|e| DataFusionError::Execution(format!("{e:?}")))?;
     }
 
-    let connection = endpoint
-        .connect()
+    let connection = crate::tls::connect(endpoint)
         .await
         .map_err(|e| DataFusionError::Execution(format!("{e:?}")))?;
 

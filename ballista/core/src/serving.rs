@@ -265,7 +265,7 @@ async fn get_flight_client(
         })?;
     }
 
-    let connection = endpoint.connect().await.map_err(|e| {
+    let connection = crate::tls::connect(endpoint).await.map_err(|e| {
         BallistaError::GrpcConnectionError(format!(
             "Error connecting to Ballista executor at {addr}: {e:?}"
         ))

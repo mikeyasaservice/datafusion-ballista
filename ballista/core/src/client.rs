@@ -142,7 +142,7 @@ impl BallistaClient {
                 })?;
         }
 
-        let connection = endpoint.connect().await.map_err(|e| {
+        let connection = crate::tls::connect(endpoint).await.map_err(|e| {
             BallistaError::GrpcConnectionError(format!(
                 "Error connecting to Ballista scheduler or executor at {addr}: {e:?}"
             ))

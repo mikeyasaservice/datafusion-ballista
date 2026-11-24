@@ -411,7 +411,7 @@ where
         // since this is a standalone configuration
         .keep_alive_timeout(Duration::from_secs(20))
         .keep_alive_while_idle(true);
-    endpoint.connect().await
+    crate::tls::connect(endpoint).await
 }
 
 /// Creates a gRPC client endpoint (without connecting) for customization.

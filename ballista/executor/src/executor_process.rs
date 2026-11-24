@@ -821,7 +821,7 @@ async fn start_executor_process_inner(
             })?;
         }
 
-        endpoint.connect().await.map_err(|_| {
+        ballista_core::tls::connect(endpoint).await.map_err(|_| {
             BallistaError::GrpcConnectionError(
                 "Could not connect to scheduler".to_string(),
             )
@@ -856,7 +856,7 @@ async fn start_executor_process_inner(
                     // past it for the whole gRPC connect timeout.
                     match time::timeout_at(
                         time::Instant::from_std(deadline),
-                        endpoint.connect(),
+                        ballista_core::tls::connect(endpoint),
                     )
                     .await
                     {
@@ -1133,7 +1133,8 @@ async fn flight_server_task(
             "Built-in arrow flight server listening on: {address:?} max_encoding_size: {max_encoding_message_size} max_decoding_size: {max_decoding_message_size}"
         );
 
-        let server_future = create_grpc_server(&grpc_server_config)
+        let router = create_grpc_server(&grpc_server_config)
+            .layer(ballista_core::tls::AuthorizeLayer)
             .add_service(
                 FlightServiceServer::new(
                     BallistaFlightService::new(work_dir)
@@ -1141,10 +1142,24 @@ async fn flight_server_task(
                 )
                 .max_decoding_message_size(max_decoding_message_size)
                 .max_encoding_message_size(max_encoding_message_size),
-            )
-            .serve_with_incoming_shutdown(incoming, grpc_shutdown.recv());
+            );
+        let result = match ballista_core::tls::config() {
+            Some(tls) => {
+                router
+                    .serve_with_incoming_shutdown(
+                        ballista_core::tls::accept(incoming, tls),
+                        grpc_shutdown.recv(),
+                    )
+                    .await
+            }
+            None => {
+                router
+                    .serve_with_incoming_shutdown(incoming, grpc_shutdown.recv())
+                    .await
+            }
+        };
 
-        server_future.await.map_err(|e| {
+        result.map_err(|e| {
             error!("Could not start built-in arrow flight server.");
             BallistaError::TonicError(e)
         })
