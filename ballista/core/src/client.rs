@@ -49,6 +49,7 @@ use std::sync::Arc;
 use std::{
     convert::TryFrom,
     task::{Context, Poll},
+    time::Duration,
 };
 use tonic::transport::Channel;
 use tonic::{Code, Status, Streaming};
@@ -68,6 +69,51 @@ fn is_transport_failure(status: &Status) -> bool {
     status
         .source()
         .is_some_and(|source| source.is::<tonic::transport::Error>())
+}
+
+/// How a client connection notices that its peer or its path is gone.
+///
+/// Shuffle fetches and result streams run over these connections. Without
+/// a connect timeout, a connection attempt whose packets are lost waits out
+/// the kernel's whole SYN retry schedule (about two minutes) before the
+/// fetch can retry. Without keep-alive, a stream on a connection the peer
+/// lost, or one the network silently dropped, waits forever, because
+/// nothing is ever sent that could fail. With these, a lost connection
+/// attempt fails in `connect_timeout` and a dead connection in at most
+/// `ping_interval + ping_timeout`, as a transport failure the fetch retries
+/// or the scheduler reruns.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Liveness {
+    pub connect_timeout: Duration,
+    pub tcp_keepalive: Duration,
+    pub ping_interval: Duration,
+    pub ping_timeout: Duration,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            tcp_keepalive: Duration::from_secs(30),
+            ping_interval: Duration::from_secs(15),
+            ping_timeout: Duration::from_secs(20),
+        }
+    }
+}
+
+impl Liveness {
+    pub(crate) fn apply(
+        self,
+        endpoint: tonic::transport::Endpoint,
+    ) -> tonic::transport::Endpoint {
+        endpoint
+            .connect_timeout(self.connect_timeout)
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(self.tcp_keepalive))
+            .http2_keep_alive_interval(self.ping_interval)
+            .keep_alive_timeout(self.ping_timeout)
+            .keep_alive_while_idle(true)
+    }
 }
 
 /// A `do_get` that produced no stream.
@@ -117,6 +163,7 @@ impl BallistaClient {
         debug!("BallistaClient connecting to {addr}");
 
         let mut endpoint = create_grpc_client_endpoint(addr.clone(), None)
+            .map(|e| Liveness::default().apply(e))
             .map_err(|e| {
                 BallistaError::GrpcConnectionError(format!(
                     "Error creating endpoint to Ballista scheduler or executor at {addr}: {e:?}"
@@ -303,7 +350,7 @@ impl BallistaClient {
     pub async fn fetch_pipelined_partition(
         &mut self,
         location: &PipelinedPartitionLocation,
-        registration_timeout: std::time::Duration,
+        registration_timeout: Duration,
     ) -> BResult<SendableRecordBatchStream> {
         let action = Action::FetchPipelinedPartition {
             job_id: location.partition_id.job_id.clone(),
@@ -753,6 +800,49 @@ impl<S: Stream<Item = Result<prost::bytes::Bytes>> + Unpin> RecordBatchStream
 
 #[cfg(test)]
 mod tests {
+    /// A peer that accepted the connection and then went silent, as one
+    /// does whose host froze or whose path dropped the connection: the
+    /// request must fail once keep-alive pings go unanswered, not wait for
+    /// an answer that never comes.
+    #[tokio::test]
+    async fn a_silent_peer_fails_the_request_instead_of_hanging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _silent = tokio::spawn(async move {
+            let mut held = vec![];
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                held.push(socket); // read nothing, answer nothing
+            }
+        });
+        let liveness = super::Liveness {
+            connect_timeout: std::time::Duration::from_secs(2),
+            tcp_keepalive: std::time::Duration::from_secs(30),
+            ping_interval: std::time::Duration::from_millis(500),
+            ping_timeout: std::time::Duration::from_millis(500),
+        };
+        let endpoint = liveness.apply(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}")).unwrap(),
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let channel = endpoint.connect().await?;
+            let mut client = super::FlightServiceClient::new(channel);
+            client
+                .do_get(super::Ticket {
+                    ticket: vec![].into(),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        })
+        .await;
+        match outcome {
+            Ok(Err(_)) => {}
+            Ok(Ok(())) => panic!("a silent peer answered"),
+            Err(_) => panic!("the request hung on a silent peer"),
+        }
+    }
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
 
